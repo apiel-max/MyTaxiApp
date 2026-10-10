@@ -950,63 +950,170 @@ the database missing.
 
 ---
 
-## Task 4 — Annotate your algorithms and commit the notes
+## Task 4 — Write your algorithm notes file and commit it
 
-Open `backend/algorithms.py` in VS Code. Read each function carefully.
-Then open a new file `docs/algorithm_notes.md` and write the following
-in your own words — do not copy from this guide.
-
+Run this to create the file:
 ```bash
 touch docs/algorithm_notes.md
 ```
 
-For each of the three algorithms, write:
+Open `backend/algorithms.py` in VS Code. Read each function, then open
+`docs/algorithm_notes.md` and type out the content below — read each line
+against the actual code as you go so you understand what you are writing.
+Do not copy-paste blindly.
 
-**Section 1 — MinHeap + top_k**
+The content to write:
 
-Answer these three questions in plain English (2–3 sentences each):
-1. What problem does `top_k` solve, and why is a heap better than sorting?
-2. Walk through what happens when a new item arrives and the heap is already full.
-3. What is the time complexity? Write it as O(?) and explain what n and k are.
+---
 
-Then write the pseudocode in plain steps (not Python). Example format:
 ```
-function top_k(items, k):
-  create empty min-heap
-  for each item in items:
-    ...
-  return heap contents sorted descending
+# Algorithm Notes — Chol Mach Kuol
+
+## 1. MinHeap + top_k
+
+### What problem does top_k solve, and why is a heap better than sorting?
+
+We get around 50,000 zone pairs from the database, each with a trip count.
+We only need the top 10. Sorting all 50,000 would be O(n log n) —
+about 50,000 × 15.6 operations. A min-heap of size 10 is O(n log k) —
+about 50,000 × 3.3 operations. That is roughly 5x fewer comparisons
+for the same result.
+
+### What happens when a new item arrives and the heap is already full?
+
+The heap always holds the 10 strongest items seen so far. The root
+(index 0) is always the weakest of those 10 — that is what "min" means.
+When a new item arrives, we compare it against the root using
+key(item) > key(heap.peek()). If the new item is stronger, replace_top()
+overwrites index 0 with it, then _sift_down bubbles it down until the
+heap property is restored. If the new item is weaker than the current
+weakest top-10, we skip it entirely.
+
+### Time and space complexity
+
+Time: O(n log k) — n is the total number of zone pairs (~50,000),
+k is how many we keep (e.g. 10).
+Space: O(k) — the heap never grows beyond k items.
+
+### Pseudocode
+
+function top_k(items, k, key):
+    create empty min-heap
+    for each item in items:
+        if heap has fewer than k items:
+            push item onto heap
+        else if key(item) > key(heap root):
+            replace heap root with item
+            sift root down to restore heap property
+    pop all items from heap into result array, filling back-to-front
+    return result  (largest first)
+
+---
+
+## 2. count_by
+
+### What does count_by return? Concrete example.
+
+It returns a dict mapping each unique value to how many times it appeared.
+
+Example — dropoff zones for zone 161: [48, 162, 48]
+
+    count_by([48, 162, 48])  →  {48: 2, 162: 1}
+
+Zone 48 appeared twice, zone 162 once.
+
+### Why a plain dict instead of collections.Counter?
+
+The assignment prohibits built-in grouping tools. Counter is a subclass
+of dict that does exactly this automatically. Writing it manually with
+"if v in counts: counts[v] += 1 else: counts[v] = 1" shows we understand
+what a hash map is doing — hashing the key, finding the bucket,
+incrementing the value.
+
+### Time and space complexity
+
+Time: O(n) — one pass, each dict lookup and insert is O(1) average.
+Space: O(d) where d is the number of distinct values
+(e.g. up to 262 distinct dropoff zones).
+
+### Pseudocode
+
+function count_by(values):
+    counts = empty dict
+    for each value v in values:
+        if v is already a key in counts:
+            counts[v] = counts[v] + 1
+        else:
+            counts[v] = 1
+    return counts
+
+---
+
+## 3. quickselect_median
+
+### Difference between two-way and three-way partition
+
+Two-way partition splits the array into two regions: items less than
+the pivot, and items greater than or equal to the pivot.
+Three-way (Dutch national flag) splits into three: strictly less than,
+equal to, and strictly greater than. The equal region is the key addition.
+
+### Why does the JFK flat fare cause a problem for two-way quickselect?
+
+JFK airport trips have a fixed $52.00 fare. In a zone like JFK,
+thousands of fares are exactly $52.00. If $52.00 is chosen as the pivot
+in a two-way partition, every equal item still gets placed on one side.
+The next recursion picks another pivot from a range still full of $52.00
+values, and the same thing happens again. In the worst case this repeats
+O(n) times, making the whole algorithm O(n²).
+
+### How does three-way partition fix it?
+
+After one pass, all $52.00 values are collected into the middle block
+a[lt..gt]. The code then checks: if the target index k falls inside that
+block, return $52.00 immediately. If k is outside the block, recurse only
+into the smaller region that contains no $52.00 values at all.
+The entire spike is eliminated in a single pass.
+
+### Time and space complexity
+
+Average case: O(n) — each round roughly halves the search range,
+giving n + n/2 + n/4 + ... = 2n work.
+Worst case: O(n²) — if the pivot is always the smallest or largest
+element every round. This is very unlikely because the code uses
+_median_of_three to pick the pivot.
+Space: O(n) — line "a = list(values)" makes a full copy so the
+caller's list is not modified.
+
+### Pseudocode for the three-way partition step
+
+pivot = median of a[lo], a[mid], a[hi]
+lt = lo, i = lo, gt = hi
+
+while i <= gt:
+    if a[i] < pivot:
+        swap a[i] and a[lt]
+        lt += 1, i += 1
+    else if a[i] > pivot:
+        swap a[i] and a[gt]
+        gt -= 1    (do NOT increment i — the swapped item is unexamined)
+    else:
+        i += 1     (a[i] == pivot, already in the right place)
+
+result: a[lo..lt-1] < pivot,  a[lt..gt] == pivot,  a[gt+1..hi] > pivot
 ```
 
-**Section 2 — count_by**
+---
 
-Answer:
-1. What does `count_by` return? Give a concrete example with 3 fake trips.
-2. Why is a plain dict used instead of `collections.Counter`?
-3. Time and space complexity.
-
-Write the pseudocode.
-
-**Section 3 — quickselect_median**
-
-Answer:
-1. What is the difference between a two-way and three-way partition?
-2. Why does the JFK flat fare ($52.00) cause a problem for two-way quickselect?
-3. How does the three-way partition fix it?
-4. Time complexity: average case and worst case.
-
-Write the pseudocode for the three-way partition step only.
-
-Once the file is written, verify it exists and commit:
+Once you have typed it all out, verify and commit:
 ```bash
 ls docs/algorithm_notes.md
 git add docs/algorithm_notes.md
-git commit -m "docs: algorithm notes — complexity, pseudocode, and JFK edge case explained"
+git commit -m "docs: algorithm notes — complexity, pseudocode, JFK edge case"
 git push origin chol/algorithms
 ```
 
-This file goes directly into your report Section 3. Writing it here means
-you only write it once.
+This file is your report Section 3. You have already written it.
 
 ---
 
@@ -1025,28 +1132,14 @@ Tag Kuol to review (he needs your charts and map to test the full dashboard).
 
 ## Your report — Section 3 (400–500 words)
 
-For each of the three algorithms, write in your own words:
+Your `docs/algorithm_notes.md` from Task 4 is your Section 3.
+Copy it into the report PDF as-is. It already has everything:
+- What each algorithm does and why it was chosen
+- Pseudocode for all three
+- Complexity for all three
+- The JFK edge case explained
 
-**1. MinHeap + top_k**
-- Problem: we have ~50,000 zone pairs and need the top 10 by trip count.
-  Sorting all 50,000 is O(n log n). A min-heap of size k is O(n log k).
-  With k=10 and n=50,000: log₂(10) ≈ 3.3 vs log₂(50,000) ≈ 15.6 — about 5x fewer operations.
-- Write the pseudocode in plain steps (not Python)
-- State: time O(n log k), space O(k)
-
-**2. count_by**
-- Problem: count how many trips went to each dropoff zone in one pass.
-  `collections.Counter` is not allowed. A plain dict does the same thing.
-- Write the pseudocode
-- State: time O(n), space O(distinct values)
-
-**3. quickselect_median**
-- Problem: find the median fare without sorting all fares.
-  Sorting is O(n log n). Quickselect is O(n) average.
-  The three-way partition handles the JFK $52.00 flat fare spike that would
-  degrade a two-way partition to O(n²).
-- Write the pseudocode for the three-way partition
-- State: time O(n) average / O(n²) worst case, space O(n) for the copy
+You do not need to write anything new.
 
 ---
 
