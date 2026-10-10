@@ -1,875 +1,604 @@
 # Team Collaboration Guide — NYC Urban Mobility Data Explorer
 
-## Final Ownership Split
+## Who owns what
 
-| Member | Role | Files | Lines |
-|--------|------|-------|-------|
-| **Abay Tessema** | Data Engineering | `pipeline/profile_data.py`, `pipeline/clean_data.py`, `pipeline/convert_zones.py`, `pipeline/make_sample.py`, `database/load_database.py` | ~938 |
-| **Alier Akuang** | Database & API | `database/schema.sql`, `database/indexes.sql`, `backend/db.py`, `backend/app.py` (all endpoints except `/api/top-routes` and `/api/zones/<id>`) | ~704 |
-| **Kuol Akech** | Frontend | `frontend/index.html`, `frontend/css/style.css`, `frontend/js/api.js`, `frontend/js/main.js` | ~1325 |
-| **Chol Mach Kuol** | Algorithms & Visualisation | `backend/algorithms.py`, `frontend/js/charts.js`, `frontend/js/map.js`, `/api/top-routes` and `/api/zones/<id>` in `backend/app.py` | ~831 |
+| Member | Role | Files |
+|--------|------|-------|
+| **Abay Tessema** | Data Engineering | `pipeline/profile_data.py`, `pipeline/clean_data.py`, `pipeline/convert_zones.py`, `pipeline/make_sample.py`, `database/load_database.py` |
+| **Alier Akuang** | Database & API | `database/schema.sql`, `database/indexes.sql`, `backend/db.py`, `backend/app.py` (all endpoints except `/api/top-routes` and `/api/zones/<id>`), `README.md`, `requirements.txt` |
+| **Kuol Akech** | Frontend | `frontend/index.html`, `frontend/css/style.css`, `frontend/js/api.js`, `frontend/js/main.js` |
+| **Chol Mach Kuol** | Algorithms & Visualisation | `backend/algorithms.py`, `frontend/js/charts.js`, `frontend/js/map.js`, `/api/top-routes` and `/api/zones/<id>` in `backend/app.py` |
 
-**Why this is the best split:**
-- Every person owns one complete, self-contained concern — no shared file ownership, no merge conflicts
-- Abay owns the full data engineering layer end-to-end including the database loader (inserting data is data engineering work)
-- Alier owns the schema, indexes, DB connection layer, and all API endpoints that do not call custom algorithms
-- Kuol owns the HTML structure, all CSS, the fetch/format layer (`api.js`), and the dashboard orchestrator (`main.js`)
-- Chol owns the algorithm implementations, the two hand-drawn SVG chart files, and the two endpoints that call the algorithms — this keeps the assignment's "algorithm solves a real problem inside the app" requirement clearly in one person's hands
-- Workload is balanced: Abay ~938, Alier ~704, Kuol ~1325, Chol ~831 lines of meaningful code
+**Rule: never edit a file you do not own. Ask the owner instead.**
 
 ---
 
-## Git Workflow
+## Git workflow — same for everyone
 
 ```bash
-# 1. Each person clones the repo on their own machine
-git clone <repo-url>
+# 1. Clone the repo on your own machine (do this once)
+git clone https://github.com/apiel-max/MyTaxiApp.git
 cd MyTaxiApp
 
-# 2. Create your branch
-git checkout -b abay/pipeline
-git checkout -b alier/database
-git checkout -b kuol/frontend
-git checkout -b chol/algorithms
+# 2. Create your personal branch (do this once)
+git checkout -b abay/pipeline      # Abay
+git checkout -b alier/database     # Alier
+git checkout -b kuol/frontend      # Kuol
+git checkout -b chol/algorithms    # Chol
 
-# 3. Commit often with clear messages
+# 3. Every time you finish a piece of work, commit it
 git add pipeline/clean_data.py
-git commit -m "clean_data: add exclusion rule for zero distance"
-
-# 4. Push and open a Pull Request to main
+git commit -m "clean_data: exclude rides with zero trip distance"
 git push origin abay/pipeline
-# Open PR on GitHub, tag one teammate to review
-```
 
-**Rules:**
-- Never commit directly to `main`
-- One PR per feature or milestone
-- Never edit a file owned by someone else — ask them instead
+# 4. Open a Pull Request on GitHub → main and tag one teammate to review
+```
 
 ---
 
 # ABAY TESSEMA — Data Engineering
 
-## Your files
+Your job is to turn the three raw TLC files into clean CSVs and a working
+SQLite database. Everything else in the project depends on your output.
+
+## Before you start
+
+Make sure you have these three files in `data/raw/`:
 ```
-pipeline/
-  profile_data.py     ← Step 1: inspect the raw data, save docs/data_profile.txt
-  clean_data.py       ← Step 2: clean, normalize, engineer features
-  convert_zones.py    ← Step 3: shapefile → GeoJSON (pure stdlib, no GDAL)
-  make_sample.py      ← helper: random sample for fast testing
-database/
-  load_database.py    ← Step 4: build data/mobility.db from the cleaned CSVs
+data/raw/
+  yellow_tripdata_2019-01.csv
+  taxi_zone_lookup.csv
+  taxi_zones/
+    taxi_zones.shp
+    taxi_zones.dbf
+    taxi_zones.prj
+```
+If you don't have them, download from the NYC TLC website or get the Google
+Drive link from the team. Without these files nothing runs.
+
+Install dependencies first:
+```bash
+pip install -r requirements.txt
 ```
 
-## Step-by-step tasks
+## Your tasks in order
 
-### 1. Run the profiler first
+### Task 1 — Profile the raw data
+Run this before touching anything else. It tells you what is broken in the
+raw file and gives you the numbers you need for the report.
+
 ```bash
 python pipeline/profile_data.py
-# Reads data/raw/yellow_tripdata_2019-01.csv
-# Prints missing values, duplicates, outliers, categorical codes
-# Saves output to docs/data_profile.txt — commit this file
 ```
 
-### 2. Understand clean_data.py before touching it
+This reads `data/raw/yellow_tripdata_2019-01.csv` and prints:
+- how many rows are missing values in each column
+- how many exact duplicate rows exist
+- pickup timestamps outside January 2019
+- trips with zero or negative distance
+- trips with impossible speeds (> 100 mph)
+- fare amounts that are negative or above $500
+- what values appear in VendorID, RatecodeID, payment_type
 
-The script runs four functions in order inside `main()`:
+It saves the full output to `docs/data_profile.txt`. **Commit that file** —
+it is evidence for your report and the marker will look for it.
 
-**`load_raw()`** — reads the CSV with pandas, adds a `source_row` column so
-any removed ride can be traced back to its line in the raw file.
-
-**`apply_exclusion_rules(df)`** — each rule is a `(name, boolean_mask)` pair.
-A ride is excluded by the FIRST rule it breaks, so every excluded ride has
-exactly one reason and the counts add up to the total removed:
-
-```python
-rules = [
-    ("pickup_outside_jan_2019",    (df["tpep_pickup_datetime"] < MONTH_START) | ...),
-    ("dropoff_not_after_pickup",   duration_min <= 0),
-    ("duration_over_6h",           duration_min > MAX_DURATION_MIN),
-    ("zero_distance",              df["trip_distance"] <= 0),
-    ("distance_over_100mi",        df["trip_distance"] > MAX_DISTANCE_MI),
-    ("fare_zero_or_negative",      df["fare_amount"] <= 0),
-    ("fare_over_500",              df["fare_amount"] > MAX_FARE),
-    ("negative_charge_component",  negative_component),
-    ("speed_over_80mph",           speed > MAX_SPEED_MPH),
-]
+```bash
+git add docs/data_profile.txt
+git commit -m "pipeline: add raw data profile output"
+git push origin abay/pipeline
 ```
 
-Returns `(kept_df, excluded_df, counts_dict)`.
+### Task 2 — Clean the data
+```bash
+python pipeline/clean_data.py
+```
 
-**`repair_and_normalize(df, lookup)`** — fixes small problems in rides we keep:
-- `congestion_surcharge` NaN → 0.0 (the surcharge only started in Feb 2019)
-- `passenger_count == 0` → NULL (data-entry habit, not an empty cab)
-- `RatecodeID == 99` → NULL (not in the TLC data dictionary)
-- Rounds all money columns to 2 decimal places
-- Renames columns to match the database schema (`VendorID` → `vendor_id`, etc.)
+This script removes bad rides, repairs small problems, and adds derived
+columns. When it finishes you will see output like:
+```
+pickup_outside_jan_2019        4,123
+dropoff_not_after_pickup          87
+duration_over_6h               1,204
+zero_distance                 14,302
+...
+TOTAL EXCLUDED               ~200,000  (2.7%)
+Done in 45s: 7,300,000 clean rides
+```
 
-**`add_features(df)`** — adds 9 derived columns:
+Check that `data/processed/` now contains:
+```
+trips_clean.csv
+excluded_records.csv
+suspicious_records.csv
+cleaning_summary.json
+```
 
-| Column | Formula | Why it matters |
-|--------|---------|----------------|
-| `trip_duration_min` | `(dropoff - pickup).total_seconds() / 60` | Base for speed calculation |
-| `avg_speed_mph` | `distance / (duration_min / 60)` | Direct proxy for traffic congestion |
-| `fare_per_mile` | `fare / distance` (NULL if distance < 0.25 mi) | Price efficiency metric |
-| `tip_pct` | `tip / fare * 100` (card payments only) | Tipping behaviour analysis |
-| `pickup_hour` | `pickup_datetime.hour` | Rush hour patterns |
-| `pickup_dow` | `pickup_datetime.dayofweek` (0=Mon) | Weekday vs weekend patterns |
-| `is_weekend` | `dow >= 5` | Weekend flag |
-| `time_of_day` | cut into 5 bins: night/morning_rush/midday/evening_rush/evening | Categorical time bucket |
-| `is_airport_trip` | pickup or dropoff zone in {1, 132, 138} | JFK/LGA/EWR flag |
+If you see an error like `FileNotFoundError: yellow_tripdata_2019-01.csv`,
+the raw file is missing from `data/raw/`. Check Task 0 above.
 
-### 3. Understand convert_zones.py
-
-The TLC ships a binary ESRI shapefile in NY State Plane feet — not longitude/latitude.
-This script converts it to GeoJSON using only `struct` and `math` from the standard library.
-
-Key functions:
-- `state_plane_to_lonlat(x_ft, y_ft)` — inverse Lambert Conformal Conic projection (Snyder 1987)
-- `read_dbf(path)` — reads the `.dbf` attribute table (LocationID, zone name, borough)
-- `read_shp(path)` — reads the `.shp` polygon geometry
-- `rings_to_geometry(rings)` — converts rings to GeoJSON, fixes winding order (shapefile = clockwise outer, GeoJSON = counter-clockwise outer)
-
+### Task 3 — Convert the zone shapefile to GeoJSON
 ```bash
 python pipeline/convert_zones.py
-# Output: data/processed/taxi_zones.geojson
 ```
 
-### 4. Understand load_database.py
-
-Builds `data/mobility.db` from the cleaned CSVs. Runs in this order:
-
-```python
-# 1. Create all tables
-con.executescript(SCHEMA_SQL.read_text())
-
-# 2. Insert dimension data
-load_dimensions(con)   # boroughs, zones + GeoJSON shapes, vendors, rate codes, payment types
-
-# 3. Bulk-insert trips in 250k-row chunks (avoids loading 7.5M rows into memory at once)
-load_trips(con, sample)
-
-# 4. Insert the exclusion log
-load_excluded(con)
-
-# 5. Build the two summary tables from the trips table
-build_summaries(con)   # GROUP BY queries — much faster than scanning trips every request
-
-# 6. Apply all indexes AFTER bulk insert (5x faster than inserting with indexes active)
-con.executescript(INDEXES_SQL.read_text())
-
-# 7. Verify: foreign keys, row counts, summary tables add up to trips
-verify(con, n_trips)
+The TLC shapefile uses a coordinate system measured in feet from a reference
+point in New Jersey — not longitude/latitude. This script converts it.
+When it finishes you will see:
+```
+Wrote 262 zones to data/processed/taxi_zones.geojson (1.8 MB)
 ```
 
+If you see fewer than 260 zones, something went wrong with the shapefile.
+Check that `data/raw/taxi_zones/` contains `.shp`, `.dbf`, and `.prj` files.
+
+### Task 4 — Build the database
 ```bash
-python database/load_database.py               # full dataset (~3-5 min, ~2.7 GB)
-python database/load_database.py --sample 0.1  # 10% sample, ~30 seconds
+# For testing (fast, ~30 seconds, loads 10% of trips):
+python database/load_database.py --sample 0.1
+
+# For the final submission (full dataset, ~3-5 minutes):
+python database/load_database.py
 ```
 
-### 5. Verify your outputs
-
-```python
-import pandas as pd, json, sqlite3
-
-# Check clean trips
-df = pd.read_csv("data/processed/trips_clean.csv")
-assert df.shape[1] == 29, "wrong column count"
-assert (df["trip_distance"] > 0).all()
-assert (df["fare_amount"] > 0).all()
-assert (df["avg_speed_mph"] <= 80).all()
-print(f"Clean trips: {len(df):,} rows")
-
-# Check GeoJSON
-geo = json.loads(open("data/processed/taxi_zones.geojson").read())
-assert len(geo["features"]) >= 260, "too few zones"
-print(f"Zones: {len(geo['features'])}")
-
-# Check database
-con = sqlite3.connect("data/mobility.db")
-n = con.execute("SELECT COUNT(*) FROM trips").fetchone()[0]
-n_zdhs = con.execute("SELECT SUM(trip_count) FROM zone_date_hour_stats").fetchone()[0]
-assert n == n_zdhs, "summary table does not add up"
-print(f"Database trips: {n:,}")
-con.close()
+When it finishes you will see:
+```
+  zone_date_hour_stats: 98,432 rows
+  route_date_stats: 487,201 rows
+  foreign keys OK, row counts OK, summary tables add up
+Done in 180s -> data/mobility.db (2.71 GB)
 ```
 
-## Extra deliverable
-Upload `yellow_tripdata_2019-01.csv`, `taxi_zone_lookup.csv`, and the `taxi_zones/`
-folder to Google Drive and share the link with the team so everyone can run the
-pipeline on their own machine.
+If you see `Foreign key violations`, something went wrong in the pipeline.
+Re-run Tasks 2 and 3 first, then try again.
 
-## Report — Section 1 (400–500 words)
-1. What the dataset is: NYC TLC yellow taxi, January 2019, ~7.5M rows
-2. Data challenges found — use the exact numbers from `docs/data_profile.txt`
-3. Your cleaning assumptions — justify each threshold (why 6h max duration? why 80mph?)
-4. One unexpected observation (e.g. `congestion_surcharge` was always NULL in Jan 2019 because the surcharge started in Feb 2019)
+### Task 5 — Verify everything works end to end
+```bash
+python backend/app.py &
+curl http://127.0.0.1:5000/api/health
+```
+
+You should see:
+```json
+{"status": "ok", "trips_in_database": 7300000}
+```
+
+If you see `Database not found`, the path in `backend/db.py` does not match
+where you saved `mobility.db`. Check the `MOBILITY_DB` environment variable
+or the default path in `db.py`.
+
+### Task 6 — Make a small sample for teammates
+Not everyone has 16GB of RAM. Run this so teammates can test quickly:
+```bash
+python pipeline/make_sample.py data/raw/yellow_tripdata_2019-01.csv 0.05
+```
+This creates `data/raw/yellow_tripdata_sample.csv` (5% of rides, ~20MB).
+Upload it to Google Drive along with the other raw files and share the link
+in the team WhatsApp/Slack.
+
+## What to commit
+```bash
+git add docs/data_profile.txt
+git add data/processed/cleaning_summary.json
+# Do NOT commit trips_clean.csv or mobility.db — they are too large
+# They are already in .gitignore
+git commit -m "pipeline: add profiler output and cleaning summary"
+git push origin abay/pipeline
+```
+
+## Your report section — Section 1 (400–500 words)
+Write this after running the profiler so you have real numbers.
+
+Answer these four questions in your own words:
+1. What is the dataset? (NYC TLC yellow taxi, January 2019, how many rows, what columns)
+2. What data problems did you find? Use the exact numbers from `docs/data_profile.txt`
+   — e.g. "14,302 rides had zero trip distance", "87 rides had a dropoff before pickup"
+3. Why did you choose each cleaning threshold?
+   — e.g. "We set the max duration to 6 hours because the distribution showed a
+   clear spike at 24 hours, which is a meter left running overnight, not a real trip"
+4. One thing that surprised you — e.g. `congestion_surcharge` was NULL for every
+   single ride in January 2019 because the surcharge only started in February 2019
 
 ---
 
 # ALIER AKUANG — Database & API
 
-## Your files
-```
-database/
-  schema.sql      ← all table definitions (star schema)
-  indexes.sql     ← 17 performance indexes, applied after bulk insert
-backend/
-  db.py           ← DB connection, filter parsing, WHERE-clause builder
-  app.py          ← all Flask endpoints EXCEPT /api/top-routes and /api/zones/<id>
-README.md
-requirements.txt
-```
+Your job is to own the database schema, the DB connection layer, and all API
+endpoints except the two that use Chol's algorithms.
 
-## Step-by-step tasks
+## Before you start
 
-### 1. Understand schema.sql
-
-The schema is a **star schema**: one fact table (`trips`) surrounded by
-dimension tables. Every string that would repeat millions of times is stored
-once in a dimension table and referenced by a small integer ID.
-
-```
-Dimension tables (small, rarely change):
-  boroughs       (borough_id, name)
-  zones          (zone_id, zone_name, borough_id, service_zone, is_airport, geometry)
-  vendors        (vendor_id, name)
-  rate_codes     (rate_code_id, description)
-  payment_types  (payment_type_id, description)
-
-Fact table (one row per cleaned ride):
-  trips          → references all five dimension tables via foreign keys
-
-Transparency tables:
-  exclusion_reasons   (reason_code, description)
-  excluded_records    ← every removed ride with its reason
-
-Summary tables (pre-aggregated, rebuilt by load_database.py):
-  zone_date_hour_stats   ← date × zone × hour  (~100k rows)
-  route_date_stats       ← date × pickup zone × dropoff zone
-```
-
-The summary tables store **SUMS and COUNTS, never averages**. This means any
-combination of rows can be re-aggregated correctly:
-```sql
--- Correct: re-sum the sums
-SELECT SUM(sum_distance) / (SUM(sum_duration_min) / 60.0) AS avg_speed
-FROM zone_date_hour_stats WHERE pickup_hour BETWEEN 7 AND 9;
-
--- Wrong: average of averages gives wrong result when group sizes differ
-SELECT AVG(avg_speed) FROM zone_date_hour_stats WHERE pickup_hour BETWEEN 7 AND 9;
-```
-
-### 2. Understand db.py
-
-Two responsibilities:
-
-**Database connection** — one read-only SQLite connection per Flask request,
-opened lazily on first use, closed automatically when the request ends:
-
-```python
-def get_db():
-    if "db" not in g:
-        g.db = sqlite3.connect(f"{DB_PATH.as_uri()}?mode=ro", uri=True)
-        g.db.row_factory = sqlite3.Row   # rows behave like dicts
-    return g.db
-```
-
-**Filter parsing + WHERE clause builder** — `parse_filters(request.args)`
-validates every query parameter and returns a typed dict. `where_clause(f)`
-turns that dict into a safe SQL fragment. User input **never** goes into SQL
-text — always as `?` parameters:
-
-```python
-# Safe — user value goes into params list, never into the SQL string
-parts.append(f"{p}pickup_hour >= ?")
-params.append(f["hour_min"])
-
-# Never do this — SQL injection risk
-parts.append(f"pickup_hour >= {f['hour_min']}")
-```
-
-`can_use(filters, allowed)` decides which table to query:
-```python
-ZONE_STATS_FILTERS = {"start_date","end_date","borough_id","zone_id","dow","hour_min","hour_max"}
-
-if can_use(filters, ZONE_STATS_FILTERS):
-    # zone_date_hour_stats: ~100k rows, fast
-else:
-    # trips: 7.5M rows, slower but handles all filters
-```
-
-### 3. Your endpoints in app.py
-
-You own all endpoints except `/api/top-routes` and `/api/zones/<id>` (those are Chol's).
-The pattern every endpoint follows is the same:
-
-```python
-@app.get("/api/summary")
-def summary():
-    f = parse_filters(request.args)           # 1. parse + validate filters
-    table, agg, where, params = source_for(f) # 2. choose fast or full table
-    row = query_one(f"SELECT {agg} FROM {table} {where}", params)  # 3. query
-    return jsonify({**metrics(row), "source": table})              # 4. respond
-```
-
-Your endpoints and what they return:
-
-| Endpoint | Returns |
-|----------|---------|
-| `GET /api/health` | `{"status": "ok", "trips_in_database": n}` |
-| `GET /api/meta` | boroughs, zones, payment types, date range |
-| `GET /api/zones/geojson` | GeoJSON FeatureCollection (cached in memory after first call) |
-| `GET /api/summary` | KPI headline numbers (trips, avg fare, avg speed, etc.) |
-| `GET /api/by-hour` | list of 24 rows, one per hour |
-| `GET /api/heatmap` | 7×24 grid rows with `trips_per_day` normalised by weekday count |
-| `GET /api/by-day` | one row per calendar date |
-| `GET /api/zone-stats` | one row per pickup zone (colours the map) |
-| `GET /api/trips` | paginated, sortable trip list |
-| `GET /api/data-quality` | exclusion log + cleaning summary |
-
-### 4. Test every endpoint
-
+You need Abay's pipeline to have run first. Check:
 ```bash
-python backend/app.py &
+ls data/processed/
+# Should show: trips_clean.csv, excluded_records.csv, taxi_zones.geojson, cleaning_summary.json
+ls data/
+# Should show: mobility.db
+```
 
+If those files are missing, ask Abay to run his pipeline and share the outputs.
+
+Install dependencies:
+```bash
+pip install -r requirements.txt
+```
+
+## Your tasks in order
+
+### Task 1 — Read schema.sql and understand the structure
+Open `database/schema.sql` and read it top to bottom. You need to be able to
+explain every table in the viva. The structure is:
+
+- `boroughs`, `zones`, `vendors`, `rate_codes`, `payment_types` — small lookup
+  tables. A borough name is stored once here, not repeated 7.5 million times.
+- `trips` — the fact table. One row per cleaned ride. References the lookup
+  tables by integer ID.
+- `excluded_records` + `exclusion_reasons` — the transparency log.
+- `zone_date_hour_stats` — pre-aggregated totals by date × zone × hour.
+  ~100k rows. Most dashboard queries hit this instead of the 7.5M-row trips table.
+- `route_date_stats` — pre-aggregated totals by date × pickup zone × dropoff zone.
+
+### Task 2 — Start the server and test your endpoints
+```bash
+python backend/app.py
+```
+
+Open a second terminal and test each endpoint one by one:
+```bash
+# Health check — should return {"status": "ok", "trips_in_database": ...}
 curl -s http://127.0.0.1:5000/api/health | python3 -m json.tool
+
+# Meta — should return boroughs, zones, payment types, date range
 curl -s http://127.0.0.1:5000/api/meta | python3 -m json.tool
+
+# Summary with no filters
 curl -s "http://127.0.0.1:5000/api/summary" | python3 -m json.tool
+
+# Summary filtered to Manhattan (borough_id=1) morning rush (7-9am)
 curl -s "http://127.0.0.1:5000/api/summary?borough_id=1&hour_min=7&hour_max=9" | python3 -m json.tool
+
+# Hourly breakdown
 curl -s "http://127.0.0.1:5000/api/by-hour" | python3 -m json.tool
+
+# Heatmap (weekday x hour grid)
 curl -s "http://127.0.0.1:5000/api/heatmap" | python3 -m json.tool
+
+# Daily totals
 curl -s "http://127.0.0.1:5000/api/by-day" | python3 -m json.tool
+
+# Zone stats (one row per pickup zone, used to colour the map)
 curl -s "http://127.0.0.1:5000/api/zone-stats" | python3 -m json.tool
+
+# Trip list, sorted by fare descending
 curl -s "http://127.0.0.1:5000/api/trips?sort=fare_amount&order=desc" | python3 -m json.tool
+
+# Data quality log
 curl -s "http://127.0.0.1:5000/api/data-quality" | python3 -m json.tool
 ```
 
-Every endpoint must return valid JSON with a 200 status. A 400 means a bad
-filter value. A 500 means the database is missing — run Abay's pipeline first.
+Every endpoint must return a 200 with valid JSON. If you get a 500, the
+database is missing — check that `data/mobility.db` exists.
 
-### 5. README.md and requirements.txt
-
-Keep `README.md` up to date as the project evolves. The video link and scrum
-board link must be filled in before submission. `requirements.txt` must list
-every Python package needed to run the project:
+### Task 3 — Draw the architecture diagram
+Use Draw.io (free at app.diagrams.net). Draw these boxes connected by arrows:
 
 ```
-flask>=3.0
-pandas>=2.0
-numpy>=1.24
+[Raw CSV files]
+      ↓
+[pipeline/clean_data.py]  [pipeline/convert_zones.py]
+      ↓                           ↓
+[data/processed/trips_clean.csv]  [taxi_zones.geojson]
+      ↓
+[database/load_database.py]
+      ↓
+[data/mobility.db  (SQLite)]
+      ↓
+[backend/app.py  (Flask API)]
+      ↓
+[browser: frontend/index.html]
 ```
 
-## Extra deliverables
-- Create the GitHub repository, invite all teammates as collaborators
-- Set up branch protection on `main` (require at least one PR review before merge)
-- Draw the architecture diagram on Draw.io: raw data → pipeline → SQLite → Flask API → browser
-  Save as `docs/architecture.png` and commit it
+Export as PNG, save to `docs/architecture.png`, commit it:
+```bash
+git add docs/architecture.png
+git commit -m "docs: add system architecture diagram"
+git push origin alier/database
+```
 
-## Report — Section 2 (400–500 words)
-1. Include `docs/architecture.png`
-2. Why SQLite: single file, no server process, easy to share, fast enough for a read-only dashboard
-3. Why a star schema: a borough name stored once vs repeated 7.5M times saves ~200MB and makes joins fast
-4. Why two summary tables: ~50MB extra storage buys queries that run in milliseconds instead of seconds
-5. Why indexes are applied after bulk insert: inserting 7.5M rows with indexes active is ~5x slower
+### Task 4 — Fill in the README links
+Open `README.md` and replace the two placeholder comments:
+```
+**Video walkthrough:** <!-- ADD YOUR VIDEO LINK HERE before submitting -->
+**Scrum board:** <!-- ADD YOUR SCRUM BOARD LINK HERE -->
+```
+with the real links once Kuol has uploaded the video and the team has a
+scrum board. Commit the change:
+```bash
+git add README.md
+git commit -m "README: add video walkthrough and scrum board links"
+git push origin alier/database
+```
+
+## Your report section — Section 2 (400–500 words)
+Answer these questions in your own words:
+1. Include `docs/architecture.png` and describe what each layer does
+2. Why SQLite and not PostgreSQL? (single file, no server to install, easy to
+   share with teammates, fast enough for a read-only dashboard)
+3. Why a star schema? (storing "Manhattan" once in `boroughs` instead of
+   repeating it 4 million times in `trips` saves ~200MB and makes joins fast)
+4. Why two summary tables? (~50MB extra storage means most queries run in
+   milliseconds instead of scanning 7.5M rows)
+5. Why are indexes applied after bulk insert? (inserting 7.5M rows with
+   indexes active is ~5x slower because every insert updates every index)
 
 ---
 
 # KUOL AKECH — Frontend
 
-## Your files
-```
-frontend/
-  index.html        ← single-page dashboard structure and all HTML sections
-  css/style.css     ← all styles, light + dark mode, no external CSS
-  js/api.js         ← fetch wrapper, request cancellation, number formatters
-  js/main.js        ← wires filters → API calls → chart renders
-```
+Your job is to own the HTML structure, all CSS, the API fetch layer, and the
+main dashboard orchestrator. Chol owns `charts.js` and `map.js` — never edit
+those files.
 
-Chol owns `js/charts.js` and `js/map.js`. Your files import from them —
-coordinate with Chol on the public function signatures but never edit his files.
+## Before you start
 
-## Step-by-step tasks
-
-### 1. Understand index.html
-
-One HTML file, no framework. The structure maps directly to the dashboard sections:
-
-```html
-<header class="masthead">        ← title + KPI meter (trips, fare, speed, tip)
-<form class="filters" id="filters">  ← all filter controls; main.js reads with FormData
-<main id="main">
-  <section id="map-section">     ← Chol's map.js renders the SVG zone map here
-  <section id="speed-section">   ← hourly speed + fare/mile line charts
-  <section id="rhythm-section">  ← weekday×hour heatmap + daily bar chart
-  <section id="routes-section">  ← top routes table (Chol's endpoint)
-  <section id="trips-section">   ← paginated, sortable trip explorer
-  <section id="quality-section"> ← data quality exclusion log
-</main>
-```
-
-Every chart container is an empty `<div>` or `<figure>` — Chol's chart
-functions write SVG into them at runtime. Never put chart markup in the HTML.
-
-### 2. Understand css/style.css
-
-All colours are CSS custom properties. Never hardcode a colour value anywhere:
-
-```css
-:root {
-  --page:      #e9ebee;   /* page background */
-  --surface:   #fcfcfb;   /* card / panel background */
-  --ink:       #15171a;   /* primary text */
-  --ink-2:     #5a5f6a;   /* secondary text */
-  --border:    #d8dade;   /* dividers */
-  --taxi:      #f6b100;   /* taxi yellow — meter only */
-  --series-1:  #2a78d6;   /* blue — weekdays, primary data series */
-  --series-2:  #eb6834;   /* orange — weekends, congestion */
-  --no-data:   #e4e6ea;   /* zones with no rides */
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --page:    #1a1c20;
-    --surface: #23262c;
-    /* ... override every variable here */
-  }
-}
-```
-
-### 3. Understand api.js
-
-Two exports: `get()` and `fmt`.
-
-**`get(path, filters, extra, channel)`** — fetches a JSON endpoint. Cancels
-any in-flight request on the same channel so fast filter changes never let a
-slow stale response overwrite a newer one:
-
-```javascript
-// Each section uses its own channel so they cancel independently
-const { data, ms } = await get("summary", filters);
-const { data } = await get("zones/161", filters, {}, "zone-detail");
-```
-
-**`fmt`** — all number formatters. Always use these, never format inline:
-
-```javascript
-fmt.int(7300000)        // "7,300,000"
-fmt.money(12.5)         // "$12.50"
-fmt.mph(23.4)           // "23.4 mph"
-fmt.miles(2.1)          // "2.10 mi"
-fmt.minutes(14.3)       // "14.3 min"
-fmt.pct(18.5)           // "18.5%"
-fmt.hour(8)             // "8 am"
-fmt.date("2019-01-15")  // "Tue, Jan 15"
-```
-
-**`esc(value)`** — always use this before putting any API string into innerHTML:
-
-```javascript
-// Correct — prevents XSS
-tbody.innerHTML = `<td>${esc(row.zone_name)}</td>`;
-
-// Wrong — XSS risk if zone_name contains < > & " '
-tbody.innerHTML = `<td>${row.zone_name}</td>`;
-```
-
-### 4. Understand main.js
-
-The orchestrator. Key functions:
-
-```javascript
-readFilters()          // reads the <form> with FormData → returns filter object
-populateFilters(meta)  // fills borough/zone/payment <select> from /api/meta
-refresh()              // calls every load* function with current filters
-
-loadMeter(f)           // GET /api/summary → updates the 5 KPI values in the header
-loadMap(f)             // GET /api/zone-stats → calls state.map.update() (Chol's code)
-loadZoneDetail(f)      // GET /api/zones/<id> → builds the zone side panel (Chol's endpoint)
-loadHourly(f)          // GET /api/by-hour → calls lineChart() twice (Chol's code)
-loadRhythm(f)          // GET /api/heatmap + /api/by-day → calls heatmap() + barChart()
-loadRoutes(f)          // GET /api/top-routes → builds the routes table
-loadTrips(f)           // GET /api/trips → builds the paginated trip table
-loadQuality()          // GET /api/data-quality → builds the exclusion bar charts
-```
-
-The `section(panelId, work)` helper wraps every load function. It sets
-`aria-busy` while loading and catches errors per-section so one slow query
-never breaks the whole page:
-
-```javascript
-async function section(panelId, work) {
-  const panel = document.getElementById(panelId);
-  panel?.setAttribute("aria-busy", "true");
-  try {
-    await work();
-  } catch (err) {
-    if (err.name === "AbortError") return;
-    // show error message inside the panel only
-  } finally {
-    panel?.setAttribute("aria-busy", "false");
-  }
-}
-```
-
-### 5. How to test without the backend
-
-Open `frontend/index.html` directly in a browser — it will show a connection
-error because there is no API. That is fine for layout and style work.
-
-To test with real data:
+You can work on layout and styles without the backend running. To see real
+data you need Abay's database and the server running:
 ```bash
 python backend/app.py
-# Open http://127.0.0.1:5000
-# Use browser DevTools → Network tab to watch every API call as you change filters
+# Then open http://127.0.0.1:5000
 ```
 
-### 6. Common tasks
+## Your tasks in order
 
-**Add a new filter:**
-1. Add `<input>` or `<select>` to `index.html` with a `name` attribute
-2. `readFilters()` picks it up automatically via `FormData` — no JS change needed
-3. Ask Alier to add the parameter to `parse_filters()` in `backend/db.py`
+### Task 1 — Open the dashboard and understand what each section does
+Open `http://127.0.0.1:5000` in your browser. You should see:
+- A header with 5 KPI numbers (rides, fare, speed, fare/mile, tip)
+- A filter bar at the top
+- A zone map of New York
+- Two line charts (speed and fare/mile by hour)
+- A heatmap (weekday × hour)
+- A daily bar chart
+- A top routes table
+- A paginated trip explorer
+- A data quality section at the bottom
 
-**Change a colour:** edit the CSS variable in `:root` — one change, affects everything.
+Open DevTools (F12) → Network tab. Change a filter and watch the API calls
+fire. Every section makes its own request independently.
 
-**Change a number format:** edit the `fmt` object in `api.js` — one change, affects the whole dashboard.
+### Task 2 — Understand how filters work
+Open `frontend/js/main.js`. Find `readFilters()`:
 
-## Extra deliverable
-Take these screenshots of the running dashboard and save to `docs/screenshots/`:
+```javascript
+function readFilters() {
+  const data = new FormData(form);
+  const f = {};
+  for (const [k, v] of data.entries()) f[k] = v.trim();
+  f.airport_only = data.has("airport_only");
+  return f;
+}
+```
 
-| Filename | What to show |
-|----------|-------------|
-| `dashboard_overview.png` | Full dashboard, no filters applied |
-| `map_speed.png` | Map shaded by average speed |
-| `heatmap.png` | Heatmap showing the Thu/Fri evening peak |
-| `top_routes.png` | Top routes table |
-| `zone_detail.png` | Zone side panel after clicking a zone on the map |
-| `data_quality.png` | Data quality section |
+This reads every `<input>` and `<select>` in the filter form by their `name`
+attribute. If you add a new filter to `index.html` with a `name`, it gets
+picked up here automatically — no JS change needed.
 
-Record and edit the 5-minute video walkthrough:
-- 0:00–0:30 — what the project does and why
-- 0:30–2:00 — live demo (show filters changing every chart)
-- 2:00–3:30 — walk through the architecture diagram (Alier explains)
-- 3:30–4:30 — show the algorithm code (Chol explains)
-- 4:30–5:00 — each person says one sentence about their contribution
+### Task 3 — Understand how a section loads
+Find `loadMeter(f)` in `main.js`. Every section follows this same pattern:
+
+```javascript
+async function loadMeter(f) {
+  const meter = $(".meter");
+  meter.classList.add("is-loading");
+  try {
+    const { data, ms } = await get("summary", f);   // call the API
+    $("#m-trips").textContent = fmt.int(data.trips); // update the DOM
+    $("#m-fare").textContent = fmt.money(data.avg_fare);
+    // ...
+  } catch (err) {
+    if (err.name !== "AbortError") $("#m-source").textContent = err.message;
+  } finally {
+    meter.classList.remove("is-loading");
+  }
+}
+```
+
+`get()` is in `api.js`. It cancels any previous request for the same endpoint
+so fast filter changes never show stale data.
+
+### Task 4 — Take the 6 required screenshots
+Start the server, open `http://127.0.0.1:5000`, and take these screenshots.
+Save them to `docs/screenshots/` with exactly these filenames:
+
+| Filename | How to get it |
+|----------|--------------|
+| `dashboard_overview.png` | Load the page with no filters. Screenshot the whole page. |
+| `map_speed.png` | In the "Shade zones by" dropdown, select "Average speed". Screenshot the map. |
+| `heatmap.png` | Scroll to the heatmap section. Screenshot it showing the Thu/Fri evening peak. |
+| `top_routes.png` | Scroll to the top routes table. Screenshot it. |
+| `zone_detail.png` | Click any zone on the map (try Midtown). Screenshot the side panel that appears. |
+| `data_quality.png` | Scroll to the bottom "What we removed" section. Screenshot it. |
+
+```bash
+git add docs/screenshots/
+git commit -m "docs: add dashboard screenshots for report"
+git push origin kuol/frontend
+```
+
+### Task 5 — Record the 5-minute video
+Use Loom, OBS, or QuickTime. Structure it exactly like this:
+
+- **0:00–0:30** — You speak: "This is the NYC Urban Mobility Data Explorer.
+  It lets you explore every yellow taxi ride in January 2019 — 7.5 million
+  trips — filtered by borough, time of day, fare range, and more."
+- **0:30–2:00** — Live demo. Change the borough filter to Manhattan. Change
+  the hour filter to 7am–9am. Show the map updating, the heatmap changing,
+  the routes table updating. Click a zone on the map and show the detail panel.
+- **2:00–3:30** — Alier shares screen and walks through the architecture
+  diagram. He explains each layer in 2–3 sentences.
+- **3:30–4:30** — Chol shares screen and shows `algorithms.py`. He explains
+  what the MinHeap does and why it is faster than sorting.
+- **4:30–5:00** — Each person says one sentence: "I built [X] which does [Y]."
+
+Upload to YouTube (unlisted) or Google Drive. Copy the link and give it to
+Alier to put in the README.
+
+## Your report contribution
+You do not write a full section but you provide the screenshots that go into
+Section 4 (Chol's insights section). Make sure the screenshots are clear,
+full-resolution, and saved before the deadline.
 
 ---
 
 # CHOL MACH KUOL — Algorithms & Visualisation
 
-## Your files
-```
-backend/
-  algorithms.py   ← MinHeap, top_k, count_by, quickselect_median (no built-ins)
-  app.py          ← /api/top-routes and /api/zones/<id> only
-frontend/js/
-  charts.js       ← hand-drawn SVG: lineChart, barChart, heatmap, hbars
-  map.js          ← SVG zone map with zoom, pan, quantile colouring
-```
+Your job is to own the three hand-written algorithms, the two SVG chart files,
+the SVG zone map, and the two API endpoints that call your algorithms.
 
-## Step-by-step tasks
-
-### 1. Understand algorithms.py
-
-Three hand-written data structures — no `heapq`, no `Counter`, no `sort()`:
-
----
-
-**MinHeap + top_k — O(n log k)**
-
-A binary heap stored in a plain list. For item at index `i`:
-- parent = `(i - 1) // 2`
-- left child = `2i + 1`
-- right child = `2i + 2`
-
-The smallest item (by `key`) is always at index 0. `top_k` keeps a min-heap
-of the best `k` seen so far. Each new item needs only one comparison with the
-root — if it beats the weakest of the current top-k, it replaces it:
-
-```python
-def top_k(items, k, key):
-    heap = MinHeap(key=key)
-    for item in items:
-        if len(heap) < k:
-            heap.push(item)                      # O(log k)
-        elif key(item) > key(heap.peek()):
-            heap.replace_top(item)               # O(log k)
-    # pop smallest-first, fill result backwards to get largest-first
-    result = [None] * len(heap)
-    for i in range(len(result) - 1, -1, -1):
-        result[i] = heap.pop()
-    return result
-```
-
-Used by `/api/top-routes` to rank ~50,000 zone pairs in O(n log k) instead
-of O(n log n) for a full sort. With k=10 and n=50,000 that is ~5x fewer
-comparisons.
-
----
-
-**count_by — O(n)**
-
-Manual hash-map grouping using a plain dict. Replaces `collections.Counter`:
-
-```python
-def count_by(values):
-    counts = {}
-    for v in values:
-        if v in counts:
-            counts[v] += 1
-        else:
-            counts[v] = 1
-    return counts
-```
-
-Used by `/api/zones/<id>` to count how many trips went to each dropoff zone
-in a single pass over the rows.
-
----
-
-**quickselect_median — O(n) average**
-
-Finds the median without sorting. Uses three-way partitioning (Dutch national
-flag) because taxi fares have huge runs of identical values (e.g. the $52.00
-JFK flat fare). A normal two-way partition keeps re-scanning those duplicates
-and degrades to O(n²); grouping them in one block discards all of them in a
-single step:
-
-```python
-# Three-way partition of a[lo..hi] around pivot:
-lt, i, gt = lo, lo, hi
-while i <= gt:
-    if a[i] < pivot:
-        a[lt], a[i] = a[i], a[lt]
-        lt += 1; i += 1
-    elif a[i] > pivot:
-        a[i], a[gt] = a[gt], a[i]
-        gt -= 1
-    else:
-        i += 1
-# a[lo..lt-1] < pivot, a[lt..gt] == pivot, a[gt+1..hi] > pivot
-```
-
-Used by `/api/zones/<id>` to return the median fare for a zone without
-sorting all its fares.
-
-Run the self-tests at any time:
-```bash
-python backend/algorithms.py
-# All algorithm self-tests passed.
-```
-
-### 2. Your two endpoints in app.py
-
-**`GET /api/top-routes`**
-
-SQL groups all zone pairs and sums their trips. Your `top_k` then ranks the
-best k without sorting everything:
-
-```python
-@app.get("/api/top-routes")
-def top_routes():
-    f = parse_filters(request.args)
-    k = min(max(int(request.args.get("k", 10)), 1), 50)
-    # ... choose table based on filters ...
-    pairs = query("SELECT pickup_zone_id AS pu, dropoff_zone_id AS dz, "
-                  "COUNT(*) AS n, ... FROM ... GROUP BY pu, dz", params)
-    # Filter out unknown zones 264/265 unless caller asks for them
-    if request.args.get("include_unknown") not in ("1", "true"):
-        pairs = [r for r in pairs if r["pu"] not in UNKNOWN_ZONES
-                                  and r["dz"] not in UNKNOWN_ZONES]
-    best = top_k(pairs, k, key=lambda r: (r["n"], -r["pu"], -r["dz"]))
-    names = {r["zone_id"]: r["zone_name"] for r in query("SELECT zone_id, zone_name FROM zones")}
-    return jsonify({"distinct_routes_ranked": len(pairs), "routes": [...]})
-```
-
-**`GET /api/zones/<id>`**
-
-One pass over the trip rows builds everything the zone detail panel needs:
-
-```python
-@app.get("/api/zones/<int:zone_id>")
-def zone_detail(zone_id):
-    # ... fetch zone metadata, build where clause ...
-    rows = get_db().execute(
-        "SELECT dropoff_zone_id, fare_amount, trip_distance, "
-        "trip_duration_min, total_amount, tip_pct FROM trips WHERE ...", params
-    ).fetchall()
-
-    dropoffs, fares = [], []
-    totals = {"n": 0, "dist": 0.0, "dur": 0.0, "fare": 0.0,
-              "total": 0.0, "tip_sum": 0.0, "tip_n": 0}
-    for dz, fare, dist, dur, total, tip_pct in rows:
-        dropoffs.append(dz)
-        fares.append(fare)
-        totals["n"] += 1
-        totals["dist"] += dist
-        # ... accumulate other totals ...
-
-    destinations = top_k(list(count_by(dropoffs).items()), 5,
-                         key=lambda kv: (kv[1], -kv[0]))
-    return jsonify({
-        "zone": zone,
-        **metrics(totals),
-        "median_fare": quickselect_median(fares),
-        "top_destinations": [...],
-    })
-```
-
-### 3. Understand charts.js
-
-Four hand-drawn SVG chart functions — no Chart.js, no D3:
-
-```javascript
-lineChart(container, opts)          // speed and fare/mile by hour
-barChart(container, opts)           // daily trip counts
-heatmap(container, cells, opts)     // weekday × hour grid (HTML buttons, keyboard-accessible)
-hbars(container, items)             // horizontal bar list (destinations, quality log)
-```
-
-All chart functions follow the same pattern:
-1. `frame(container, height, margin)` — clear the container, create the SVG element
-2. `niceTicks(min, max)` — calculate clean axis values (1, 2, 5 × 10^n steps)
-3. Draw grid lines and axis labels as SVG `<line>` and `<text>` elements
-4. Draw data marks (`<path>` for lines and bars, `<button>` for heatmap cells)
-5. Add a transparent hit layer for hover/tooltip interaction
-
-`lineChart` returns `{ highlight(index), clear() }` so two charts can share
-a crosshair — hovering over the speed chart also highlights the same hour on
-the fare-per-mile chart.
-
-### 4. Understand map.js
-
-SVG zone map with zoom, pan, and quantile colouring.
-
-**Projection** — equirectangular scaled by cos(40.7°) to avoid a stretched city:
-```javascript
-const KX = Math.cos((40.7 * Math.PI) / 180);
-const project = ([lon, lat]) => [(lon + 74.3) * KX * 1000, (41.0 - lat) * 1000];
-```
-
-**Zoom/pan** — changes the SVG `viewBox`, not element positions. This means
-all the zone paths stay at fixed coordinates; only the visible window moves:
-```javascript
-function zoomAt(factor, cx, cy) {
-    const w = Math.min(home.w * 1.5, Math.max(home.w / 25, view.w * factor));
-    view = { x: cx - ((cx - view.x) / view.w) * w, ... };
-    svg.setAttribute("viewBox", `${view.x} ${view.y} ${view.w} ${view.h}`);
-}
-```
-
-**Quantile colouring** — equal number of zones per colour step, not equal
-value ranges. Pickup counts are extremely skewed (Midtown has thousands of
-times more rides than most of Queens), so equal-width steps would paint
-almost every zone the lightest colour:
-```javascript
-const k = BLUE_RAMP.length;   // 7 colour steps
-const breaks = [];
-for (let i = 1; i < k; i++)
-    breaks.push(sorted[Math.floor((i / k) * (sorted.length - 1))]);
-```
-
-### 5. Test your part
+## Before you start
 
 ```bash
-# Test algorithms in isolation
+# Test the algorithms without needing the database
 python backend/algorithms.py
+# Should print: All algorithm self-tests passed.
 
-# Test your two endpoints
+# Test your endpoints (needs the database)
 python backend/app.py &
 curl "http://127.0.0.1:5000/api/top-routes?k=5"
-curl "http://127.0.0.1:5000/api/zones/161"    # Midtown Center
-curl "http://127.0.0.1:5000/api/zones/132"    # JFK Airport
+curl "http://127.0.0.1:5000/api/zones/161"
+```
 
-# Open the dashboard and check the map, charts, and routes table render
+## Your tasks in order
+
+### Task 1 — Run the algorithm self-tests and make sure they pass
+```bash
+python backend/algorithms.py
+```
+
+If any assertion fails, read the error message — it tells you which trial
+number failed and what the expected vs actual values were. Fix the algorithm
+before moving on.
+
+### Task 2 — Test your two endpoints manually
+```bash
+python backend/app.py &
+
+# Top 5 busiest routes across all of January
+curl -s "http://127.0.0.1:5000/api/top-routes?k=5" | python3 -m json.tool
+
+# Top 10 routes on Monday mornings only
+curl -s "http://127.0.0.1:5000/api/top-routes?k=10&dow=0&hour_min=7&hour_max=9" | python3 -m json.tool
+
+# Zone detail for Midtown Center (zone 161)
+curl -s "http://127.0.0.1:5000/api/zones/161" | python3 -m json.tool
+
+# Zone detail for JFK Airport (zone 132)
+curl -s "http://127.0.0.1:5000/api/zones/132" | python3 -m json.tool
+```
+
+Check that `/api/top-routes` returns a `distinct_routes_ranked` field showing
+how many zone pairs were ranked (should be ~50,000 for no filters). Check that
+`/api/zones/161` returns `median_fare` and `top_destinations`.
+
+### Task 3 — Open the dashboard and check the charts render
+```bash
 open http://127.0.0.1:5000
 ```
 
-## Report — Section 3 (400–500 words)
+Check each of these works:
+- The zone map loads and zones are coloured
+- Clicking a zone shows the detail panel with top destinations and median fare
+- The speed line chart and fare/mile line chart both render
+- Hovering over one chart highlights the same hour on the other chart
+- The heatmap renders with 7 rows (days) × 24 columns (hours)
+- The daily bar chart renders with weekends in orange
+- The top routes table shows 10 rows
 
-For each of the three algorithms write:
-- What problem it solves in this specific dataset
-- Pseudocode (written out step by step, not copied from the Python)
-- Time and space complexity with justification
-- Why you chose it over the obvious alternative
+If any chart is blank, open DevTools → Console and look for errors.
 
-Example structure for top_k:
-```
-Problem: rank the K busiest routes from ~50,000 zone pairs
-Naive approach: sort all pairs → O(n log n) time, O(n) space
-Better approach: min-heap of size k → O(n log k) time, O(k) space
-With k=10, n=50,000: log₂(10) ≈ 3.3 vs log₂(50,000) ≈ 15.6 → ~5x fewer comparisons
+### Task 4 — Understand what your algorithms actually do in production
 
-Pseudocode:
-  heap ← empty min-heap of capacity k
-  for each route r in all_routes:
-      if heap.size < k:
-          heap.push(r)
-      else if r.trips > heap.minimum.trips:
-          heap.replace_minimum(r)
-  return heap contents sorted largest-first
-```
+**top_k in /api/top-routes:**
+SQL gives you a list of every zone pair with its trip count — could be 50,000
+pairs. Instead of sorting all 50,000 to find the top 10, you keep a min-heap
+of size 10. For each new pair, if it beats the weakest in the heap, it
+replaces it. Total work: 50,000 comparisons instead of 50,000 × log(50,000).
 
-## Report — Section 4 (400–500 words)
+**count_by + top_k in /api/zones/<id>:**
+For a zone like Midtown, you fetch all its trips from the database. In one
+pass you count how many trips went to each dropoff zone (count_by), then rank
+the top 5 destinations (top_k). You also collect all fare amounts in the same
+pass so quickselect_median can find the median without sorting them.
 
-Derive 3 insights from the actual data. For each:
-- The API call or SQL query that produced it
-- A screenshot from Kuol's `docs/screenshots/` folder
-- What it means for urban mobility
+**quickselect_median in /api/zones/<id>:**
+JFK has thousands of $52.00 flat-fare trips. A normal two-way quickselect
+would keep re-partitioning those identical values and slow down to O(n²).
+The three-way partition puts all $52.00 fares in the middle block and skips
+them entirely in the next round.
 
-Suggested insights:
-1. Speed drops from ~23 mph at 5 am to ~11 mph at 8 am — what does that cost riders in fare per mile?
-2. Upper East Side → Upper East Side is the single busiest route — what does that say about short local trips?
-3. Card tip % averages ~18% overall but drops for airport trips — why might that be?
+### Task 5 — Write your report sections
 
----
+**Section 3 — Algorithms**
 
-# NEW FOR EVERYONE
+For each of the three algorithms, write in your own words:
+- What problem in this dataset made you need it
+- Step-by-step pseudocode (not Python — write it out in plain English steps)
+- Time complexity and why (e.g. "O(n log k) because each of the n items
+  triggers at most one heap operation costing log k")
+- Space complexity
+- What the naive approach would be and why yours is better
 
-- Write **one paragraph** for **Section 5 (Reflection)** covering your personal technical challenges and what you would do differently
-- Present your own part in the video (see Kuol's section for the structure)
-- Test the full project from scratch on your own laptop before the submission deadline:
+**Section 4 — Insights**
 
-```bash
-git checkout main && git pull
-pip install -r requirements.txt
-python pipeline/profile_data.py
-python pipeline/clean_data.py
-python pipeline/convert_zones.py
-python database/load_database.py --sample 0.1
-python backend/app.py
-# open http://127.0.0.1:5000 and check every section loads
-```
+Run the dashboard with real data and find three things that surprised you.
+For each one:
+- Write the API call or SQL query you used to find it
+- Use one of Kuol's screenshots to illustrate it
+- Write 2–3 sentences explaining what it means for how New York moves
+
+Suggested starting points:
+1. Filter to hour 5am vs hour 8am — how much does speed drop and what does
+   that do to fare per mile?
+2. Look at the top routes table — why is Upper East Side → Upper East Side
+   the busiest route? What does that say about how people use taxis for short trips?
+3. Filter to airport_only=1 — how does the tip percentage compare to the
+   city average? Why might airport passengers tip differently?
 
 ---
 
 # SHARED SUBMISSION CHECKLIST
 
-## Code
-- [ ] `python backend/algorithms.py` prints "All algorithm self-tests passed" (Chol)
-- [ ] All 12 API endpoints return valid JSON (Alier + Chol)
-- [ ] Dashboard loads and all 6 sections render correctly (Kuol)
-- [ ] Filters change every chart correctly (Kuol)
-- [ ] `data/mobility.db` built and verified — FK check passes, summary tables add up (Abay)
+Go through this together the day before the deadline.
 
-## Files that must exist before submission
-- [ ] `data/processed/taxi_zones.geojson` (Abay)
-- [ ] `data/processed/cleaning_summary.json` (Abay)
-- [ ] `docs/data_profile.txt` (Abay)
-- [ ] `docs/architecture.png` (Alier)
-- [ ] `docs/screenshots/` — at least 6 screenshots (Kuol)
-- [ ] `README.md` — video link and scrum board link filled in (Alier)
-- [ ] `codevibe-reports/<name>.report.json` — one per team member (everyone)
+## Code — must all work
+- [ ] `python backend/algorithms.py` → prints "All algorithm self-tests passed"
+- [ ] `python backend/app.py` starts without errors
+- [ ] All 12 endpoints return 200 with valid JSON (test with curl commands above)
+- [ ] Dashboard loads at `http://127.0.0.1:5000` and all 6 sections render
+- [ ] Changing filters updates every chart
 
-## Report PDF (team lead assembles)
+## Files — must all exist in the repo
+- [ ] `data/processed/cleaning_summary.json`
+- [ ] `docs/data_profile.txt`
+- [ ] `docs/architecture.png`
+- [ ] `docs/screenshots/dashboard_overview.png`
+- [ ] `docs/screenshots/map_speed.png`
+- [ ] `docs/screenshots/heatmap.png`
+- [ ] `docs/screenshots/top_routes.png`
+- [ ] `docs/screenshots/zone_detail.png`
+- [ ] `docs/screenshots/data_quality.png`
+- [ ] `README.md` has real video link and real scrum board link
+- [ ] `codevibe-reports/` has one `.report.json` per team member
+
+## Report PDF — must be assembled by team lead
 - [ ] Section 1 — Dataset & cleaning (Abay)
-- [ ] Section 2 — Architecture & design (Alier)
-- [ ] Section 3 — Algorithms (Chol)
-- [ ] Section 4 — Insights with screenshots (Chol)
-- [ ] Section 5 — Reflection (one paragraph each)
+- [ ] Section 2 — Architecture & design decisions (Alier, include architecture.png)
+- [ ] Section 3 — Algorithms with pseudocode and complexity (Chol)
+- [ ] Section 4 — Three insights with screenshots (Chol, use Kuol's screenshots)
+- [ ] Section 5 — One reflection paragraph per person (everyone)
+- [ ] 2–3 pages total, PDF format
 
-## Submission
-- [ ] Team participation sheet completed and linked (team lead)
-- [ ] GitHub commit history shows meaningful commits from all 4 members
-- [ ] Repo zipped and submitted with GitHub link and video link
+## Submission — team lead does this
+- [ ] Team participation sheet filled in and shared (comment-only for non-leads)
+- [ ] GitHub has meaningful commits from all 4 members on code files
+- [ ] Repo zipped
+- [ ] Submitted on Canvas with GitHub link, video link, and PDF
