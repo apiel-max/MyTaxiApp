@@ -950,25 +950,63 @@ the database missing.
 
 ---
 
-## Task 4 — Understand what your algorithms do in production
+## Task 4 — Annotate your algorithms and commit the notes
 
-**`top_k` in `/api/top-routes`:**
-SQL gives you every zone pair with its trip count — around 50,000 pairs.
-Instead of sorting all 50,000 to find the top 10, you keep a min-heap of
-size 10. For each new pair, if it beats the weakest in the heap, it replaces
-it. You do 50,000 comparisons instead of 50,000 × log₂(50,000) ≈ 780,000.
+Open `backend/algorithms.py` in VS Code. Read each function carefully.
+Then open a new file `docs/algorithm_notes.md` and write the following
+in your own words — do not copy from this guide.
 
-**`count_by` + `top_k` in `/api/zones/<id>`:**
-For a zone like Midtown, you fetch all its trips from the database. In one
-pass you count how many trips went to each dropoff zone (`count_by`), then
-rank the top 5 destinations (`top_k`). You also collect all fare amounts in
-the same pass so `quickselect_median` can find the median.
+```bash
+touch docs/algorithm_notes.md
+```
 
-**`quickselect_median` in `/api/zones/<id>`:**
-JFK has thousands of $52.00 flat-fare trips. A normal two-way quickselect
-would keep re-partitioning those identical values and slow to O(n²).
-The three-way partition puts all $52.00 fares in the middle block and skips
-them entirely in the next round, keeping the average O(n).
+For each of the three algorithms, write:
+
+**Section 1 — MinHeap + top_k**
+
+Answer these three questions in plain English (2–3 sentences each):
+1. What problem does `top_k` solve, and why is a heap better than sorting?
+2. Walk through what happens when a new item arrives and the heap is already full.
+3. What is the time complexity? Write it as O(?) and explain what n and k are.
+
+Then write the pseudocode in plain steps (not Python). Example format:
+```
+function top_k(items, k):
+  create empty min-heap
+  for each item in items:
+    ...
+  return heap contents sorted descending
+```
+
+**Section 2 — count_by**
+
+Answer:
+1. What does `count_by` return? Give a concrete example with 3 fake trips.
+2. Why is a plain dict used instead of `collections.Counter`?
+3. Time and space complexity.
+
+Write the pseudocode.
+
+**Section 3 — quickselect_median**
+
+Answer:
+1. What is the difference between a two-way and three-way partition?
+2. Why does the JFK flat fare ($52.00) cause a problem for two-way quickselect?
+3. How does the three-way partition fix it?
+4. Time complexity: average case and worst case.
+
+Write the pseudocode for the three-way partition step only.
+
+Once the file is written, verify it exists and commit:
+```bash
+ls docs/algorithm_notes.md
+git add docs/algorithm_notes.md
+git commit -m "docs: algorithm notes — complexity, pseudocode, and JFK edge case explained"
+git push origin chol/algorithms
+```
+
+This file goes directly into your report Section 3. Writing it here means
+you only write it once.
 
 ---
 
